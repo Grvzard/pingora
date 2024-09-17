@@ -100,6 +100,8 @@ impl<T> SslStream<T> {
 
 use std::ops::{Deref, DerefMut};
 
+use super::UniqueIDType;
+
 impl<T> Deref for SslStream<T> {
     type Target = InnerSsl<T>;
 

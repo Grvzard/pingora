@@ -16,6 +16,7 @@
 
 #![allow(non_camel_case_types)]
 
+#[cfg(unix)]
 use libc::socklen_t;
 #[cfg(target_os = "linux")]
 use libc::{c_int, c_ulonglong, c_void};
@@ -23,11 +24,14 @@ use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use std::io::{self, ErrorKind};
 use std::mem;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
 use std::time::Duration;
-use tokio::net::{TcpSocket, TcpStream, UnixStream};
-
-use crate::connectors::l4::BindTo;
+#[cfg(unix)]
+use tokio::net::UnixStream;
+use tokio::net::{TcpSocket, TcpStream};
 
 /// The (copy of) the kernel struct tcp_info returns
 #[repr(C)]
@@ -98,8 +102,13 @@ impl TCP_INFO {
     }
 
     /// Return the size of [`TCP_INFO`]
+    #[cfg(unix)]
     pub fn len() -> socklen_t {
         mem::size_of::<Self>() as socklen_t
+    }
+    #[cfg(windows)]
+    pub fn len() -> usize {
+        mem::size_of::<Self>()
     }
 }
 
@@ -162,36 +171,13 @@ fn cvt_linux_error(t: i32) -> io::Result<i32> {
 
 #[cfg(target_os = "linux")]
 fn ip_bind_addr_no_port(fd: RawFd, val: bool) -> io::Result<()> {
-    set_opt(
-        fd,
-        libc::IPPROTO_IP,
-        libc::IP_BIND_ADDRESS_NO_PORT,
-        val as c_int,
-    )
+    const IP_BIND_ADDRESS_NO_PORT: i32 = 24;
+
+    set_opt(fd, libc::IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, val as c_int)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn ip_bind_addr_no_port(_fd: RawFd, _val: bool) -> io::Result<()> {
-    Ok(())
-}
-
-/// IP_LOCAL_PORT_RANGE is only supported on Linux 6.3 and higher,
-/// ip_local_port_range() is a no-op on unsupported versions.
-/// See the [man page](https://man7.org/linux/man-pages/man7/ip.7.html) for more details.
-#[cfg(target_os = "linux")]
-fn ip_local_port_range(fd: RawFd, low: u16, high: u16) -> io::Result<()> {
-    const IP_LOCAL_PORT_RANGE: i32 = 51;
-    let range: u32 = (low as u32) | ((high as u32) << 16);
-
-    let result = set_opt(fd, libc::IPPROTO_IP, IP_LOCAL_PORT_RANGE, range as c_int);
-    match result {
-        Err(e) if e.raw_os_error() != Some(libc::ENOPROTOOPT) => Err(e),
-        _ => Ok(()), // no error or ENOPROTOOPT
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn ip_local_port_range(_fd: RawFd, _low: u16, _high: u16) -> io::Result<()> {
     Ok(())
 }
 
@@ -233,8 +219,13 @@ fn set_keepalive(fd: RawFd, ka: &TcpKeepalive) -> io::Result<()> {
     set_so_keepalive_count(fd, ka.count)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn set_keepalive(_fd: RawFd, _ka: &TcpKeepalive) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_keepalive(_sock: RawSocket, _ka: &TcpKeepalive) -> io::Result<()> {
     Ok(())
 }
 
@@ -244,8 +235,13 @@ pub fn get_tcp_info(fd: RawFd) -> io::Result<TCP_INFO> {
     get_opt_sized(fd, libc::IPPROTO_TCP, libc::TCP_INFO)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn get_tcp_info(_fd: RawFd) -> io::Result<TCP_INFO> {
+    Ok(unsafe { TCP_INFO::new() })
+}
+
+#[cfg(windows)]
+pub fn get_tcp_info(_sock: RawSocket) -> io::Result<TCP_INFO> {
     Ok(unsafe { TCP_INFO::new() })
 }
 
@@ -256,8 +252,13 @@ pub fn set_recv_buf(fd: RawFd, val: usize) -> Result<()> {
         .or_err(ConnectError, "failed to set SO_RCVBUF")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn set_recv_buf(_fd: RawFd, _: usize) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn set_recv_buf(_sock: RawSocket, _: usize) -> Result<()> {
     Ok(())
 }
 
@@ -266,8 +267,13 @@ pub fn get_recv_buf(fd: RawFd) -> io::Result<usize> {
     get_opt_sized::<c_int>(fd, libc::SOL_SOCKET, libc::SO_RCVBUF).map(|v| v as usize)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn get_recv_buf(_fd: RawFd) -> io::Result<usize> {
+    Ok(0)
+}
+
+#[cfg(windows)]
+pub fn get_recv_buf(_sock: RawSocket) -> io::Result<usize> {
     Ok(0)
 }
 
@@ -283,8 +289,13 @@ pub fn set_tcp_fastopen_connect(fd: RawFd) -> Result<()> {
     .or_err(ConnectError, "failed to set TCP_FASTOPEN_CONNECT")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn set_tcp_fastopen_connect(_fd: RawFd) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn set_tcp_fastopen_connect(_sock: RawSocket) -> Result<()> {
     Ok(())
 }
 
@@ -295,11 +306,15 @@ pub fn set_tcp_fastopen_backlog(fd: RawFd, backlog: usize) -> Result<()> {
         .or_err(ConnectError, "failed to set TCP_FASTOPEN")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn set_tcp_fastopen_backlog(_fd: RawFd, _backlog: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn set_tcp_fastopen_backlog(_sock: RawSocket, _backlog: usize) -> Result<()> {
+    Ok(())
+}
 #[cfg(target_os = "linux")]
 pub fn set_dscp(fd: RawFd, value: u8) -> Result<()> {
     use super::socket::SocketAddr;
@@ -320,8 +335,13 @@ pub fn set_dscp(fd: RawFd, value: u8) -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn set_dscp(_fd: RawFd, _value: u8) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn set_dscp(_sock: RawSocket, _value: u8) -> Result<()> {
     Ok(())
 }
 
@@ -330,47 +350,19 @@ pub fn get_socket_cookie(fd: RawFd) -> io::Result<u64> {
     get_opt_sized::<c_ulonglong>(fd, libc::SOL_SOCKET, libc::SO_COOKIE)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn get_socket_cookie(_fd: RawFd) -> io::Result<u64> {
     Ok(0) // SO_COOKIE is a Linux concept
 }
 
-/// connect() to the given address while optionally binding to the specific source address and port range.
+/// connect() to the given address while optionally binding to the specific source address.
 ///
 /// The `set_socket` callback can be used to tune the socket before `connect()` is called.
 ///
-/// If a [`BindTo`] is set with a port range and fallback setting enabled this function will retry
-/// on EADDRNOTAVAIL ignoring the port range.
-///
 /// `IP_BIND_ADDRESS_NO_PORT` is used.
-/// `IP_LOCAL_PORT_RANGE` is used if a port range is set on [`BindTo`].
-pub(crate) async fn connect_with<F: FnOnce(&TcpSocket) -> Result<()> + Clone>(
+pub(crate) async fn connect_with<F: FnOnce(&TcpSocket) -> Result<()>>(
     addr: &SocketAddr,
-    bind_to: Option<&BindTo>,
-    set_socket: F,
-) -> Result<TcpStream> {
-    if bind_to.as_ref().map_or(false, |b| b.will_fallback()) {
-        // if we see an EADDRNOTAVAIL error clear the port range and try again
-        let connect_result = inner_connect_with(addr, bind_to, set_socket.clone()).await;
-        if let Err(e) = connect_result.as_ref() {
-            if matches!(e.etype(), BindError) {
-                let mut new_bind_to = BindTo::default();
-                new_bind_to.addr = bind_to.as_ref().and_then(|b| b.addr);
-                // reset the port range
-                new_bind_to.set_port_range(None).unwrap();
-                return inner_connect_with(addr, Some(&new_bind_to), set_socket).await;
-            }
-        }
-        connect_result
-    } else {
-        // not retryable
-        inner_connect_with(addr, bind_to, set_socket).await
-    }
-}
-
-async fn inner_connect_with<F: FnOnce(&TcpSocket) -> Result<()>>(
-    addr: &SocketAddr,
-    bind_to: Option<&BindTo>,
+    bind_to: Option<&SocketAddr>,
     set_socket: F,
 ) -> Result<TcpStream> {
     let socket = if addr.is_ipv4() {
@@ -380,25 +372,23 @@ async fn inner_connect_with<F: FnOnce(&TcpSocket) -> Result<()>>(
     }
     .or_err(SocketError, "failed to create socket")?;
 
-    if cfg!(target_os = "linux") {
-        ip_bind_addr_no_port(socket.as_raw_fd(), true).or_err(
-            SocketError,
-            "failed to set socket opts IP_BIND_ADDRESS_NO_PORT",
-        )?;
+    #[cfg(target_os = "linux")]
+    {
+        ip_bind_addr_no_port(socket.as_raw_fd(), true)
+            .or_err(SocketError, "failed to set socket opts")?;
 
-        if let Some(bind_to) = bind_to {
-            if let Some((low, high)) = bind_to.port_range() {
-                ip_local_port_range(socket.as_raw_fd(), low, high)
-                    .or_err(SocketError, "failed to set socket opts IP_LOCAL_PORT_RANGE")?;
-            }
-
-            if let Some(baddr) = bind_to.addr {
-                socket
-                    .bind(baddr)
-                    .or_err_with(BindError, || format!("failed to bind to socket {}", baddr))?;
-            }
-        }
+        if let Some(baddr) = bind_to {
+            socket
+                .bind(*baddr)
+                .or_err_with(BindError, || format!("failed to bind to socket {}", *baddr))?;
+        };
     }
+    #[cfg(windows)]
+    if let Some(baddr) = bind_to {
+        socket
+            .bind(*baddr)
+            .or_err_with(BindError, || format!("failed to bind to socket {}", *baddr))?;
+    };
     // TODO: add support for bind on other platforms
 
     set_socket(&socket)?;
@@ -411,13 +401,13 @@ async fn inner_connect_with<F: FnOnce(&TcpSocket) -> Result<()>>(
 
 /// connect() to the given address while optionally binding to the specific source address.
 ///
-/// `IP_BIND_ADDRESS_NO_PORT` is used
-/// `IP_LOCAL_PORT_RANGE` is used if a port range is set on [`BindTo`].
-pub async fn connect(addr: &SocketAddr, bind_to: Option<&BindTo>) -> Result<TcpStream> {
+/// `IP_BIND_ADDRESS_NO_PORT` is used.
+pub async fn connect(addr: &SocketAddr, bind_to: Option<&SocketAddr>) -> Result<TcpStream> {
     connect_with(addr, bind_to, |_| Ok(())).await
 }
 
 /// connect() to the given Unix domain socket
+#[cfg(unix)]
 pub async fn connect_uds(path: &std::path::Path) -> Result<UnixStream> {
     UnixStream::connect(path)
         .await
@@ -428,8 +418,7 @@ fn wrap_os_connect_error(e: std::io::Error, context: String) -> Box<Error> {
     match e.kind() {
         ErrorKind::ConnectionRefused => Error::because(ConnectRefused, context, e),
         ErrorKind::TimedOut => Error::because(ConnectTimedout, context, e),
-        ErrorKind::AddrNotAvailable => Error::because(BindError, context, e),
-        ErrorKind::PermissionDenied | ErrorKind::AddrInUse => {
+        ErrorKind::PermissionDenied | ErrorKind::AddrInUse | ErrorKind::AddrNotAvailable => {
             Error::because(InternalError, context, e)
         }
         _ => match e.raw_os_error() {
@@ -460,9 +449,12 @@ impl std::fmt::Display for TcpKeepalive {
 
 /// Apply the given TCP keepalive settings to the given connection
 pub fn set_tcp_keepalive(stream: &TcpStream, ka: &TcpKeepalive) -> Result<()> {
-    let fd = stream.as_raw_fd();
+    #[cfg(unix)]
+    let raw = stream.as_raw_fd();
+    #[cfg(windows)]
+    let raw = stream.as_raw_socket();
     // TODO: check localhost or if keepalive is already set
-    set_keepalive(fd, ka).or_err(ConnectError, "failed to set keepalive")
+    set_keepalive(raw, ka).or_err(ConnectError, "failed to set keepalive")
 }
 
 #[cfg(test)]
@@ -473,7 +465,10 @@ mod test {
     fn test_set_recv_buf() {
         use tokio::net::TcpSocket;
         let socket = TcpSocket::new_v4().unwrap();
+        #[cfg(unix)]
         set_recv_buf(socket.as_raw_fd(), 102400).unwrap();
+        #[cfg(windows)]
+        set_recv_buf(socket.as_raw_socket(), 102400).unwrap();
 
         #[cfg(target_os = "linux")]
         {

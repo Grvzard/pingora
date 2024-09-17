@@ -18,30 +18,32 @@ mod digest;
 pub mod http;
 pub mod l4;
 pub mod raw_connect;
-pub mod tls;
+pub mod ssl;
+#[cfg(windows)]
+mod windows;
 
 pub use digest::{
     Digest, GetProxyDigest, GetSocketDigest, GetTimingDigest, ProtoDigest, SocketDigest,
     TimingDigest,
 };
 pub use l4::ext::TcpKeepalive;
-pub use tls::ALPN;
+pub use ssl::ALPN;
 
 use async_trait::async_trait;
 use std::fmt::Debug;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-#[cfg(unix)]
-pub type UniqueIDType = i32;
-#[cfg(windows)]
-pub type UniqueIDType = usize;
-
 /// Define how a protocol should shutdown its connection.
 #[async_trait]
 pub trait Shutdown {
     async fn shutdown(&mut self) -> ();
 }
+
+#[cfg(unix)]
+pub type UniqueIDType = i32;
+#[cfg(windows)]
+pub type UniqueIDType = usize;
 
 /// Define how a given session/connection identifies itself.
 pub trait UniqueID {
@@ -58,7 +60,7 @@ pub trait Ssl {
     }
 
     /// Return the [`ssl::SslDigest`] for logging
-    fn get_ssl_digest(&self) -> Option<Arc<tls::SslDigest>> {
+    fn get_ssl_digest(&self) -> Option<Arc<ssl::SslDigest>> {
         None
     }
 
@@ -213,7 +215,6 @@ mod ext_io_impl {
 pub(crate) trait ConnFdReusable {
     fn check_fd_match<V: AsRawFd>(&self, fd: V) -> bool;
 }
-
 #[cfg(windows)]
 pub(crate) trait ConnSockReusable {
     fn check_sock_match<V: AsRawSocket>(&self, sock: V) -> bool;
@@ -241,7 +242,6 @@ impl ConnFdReusable for SocketAddr {
         }
     }
 }
-
 #[cfg(windows)]
 impl ConnSockReusable for SocketAddr {
     fn check_sock_match<V: AsRawSocket>(&self, sock: V) -> bool {
@@ -299,6 +299,36 @@ impl ConnFdReusable for InetSocketAddr {
                     true
                 } else {
                     error!("Crit: FD mismatch: fd: {fd:?}, addr: {addr}, peer: {peer}",);
+                    false
+                }
+            }
+            Err(e) => {
+                debug!("Idle connection is broken: {e:?}");
+                false
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ConnSockReusable for InetSocketAddr {
+    fn check_sock_match<V: AsRawSocket>(&self, sock: V) -> bool {
+        let sock = sock.as_raw_socket();
+        match windows::peer_addr(sock) {
+            Ok(peer) => {
+                const ZERO: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+                if self.ip() == ZERO {
+                    // https://www.rfc-editor.org/rfc/rfc1122.html#section-3.2.1.3
+                    // 0.0.0.0 should only be used as source IP not destination
+                    // However in some systems this destination IP is mapped to 127.0.0.1.
+                    // We just skip this check here to avoid false positive mismatch.
+                    return true;
+                }
+                if self == &peer {
+                    debug!("Inet FD to: {self} is reusable");
+                    true
+                } else {
+                    error!("Crit: FD mismatch: fd: {sock:?}, addr: {self}, peer: {peer}",);
                     false
                 }
             }
