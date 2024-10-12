@@ -269,6 +269,7 @@ impl Server {
 
         Ok(Server {
             services: vec![],
+            #[cfg(unix)]
             listen_fds: None,
             shutdown_watch: tx,
             shutdown_recv: rx,
